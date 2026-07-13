@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/mattn/go-sqlite3"
 	_ "github.com/mattn/go-sqlite3"
@@ -52,18 +53,27 @@ func main() {
 		log.Fatal(err)
 	}
 
+	queryAlter := `ALTER TABLE accounts ADD COLUMN user_id INTEGER REFERENCES users(id);`
+
+	_, err = db.Exec(queryAlter)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		log.Fatal(err)
+	}
+
 	//insert data
-	addUser(db, "alice", "aliceemial@gmail.com")
+	addUser(db, "alice", "alicemial@gmail.com")
 	addUser(db, "beta", "betal@gmail.com")
 	addUser(db, "cena", "cenal@gmail.com")
 	addUser(db, "dela", "deal@gmail.com")
 
-	fmt.Println(listAccounts(db))
-	err = transfer(db, 3, 4, 130)
+	err = addAccount(db, "shodt", 100, 99)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("reject as expected: ", err)
 	}
-	fmt.Println(listAccounts(db))
+	fmt.Println(getAccountsForUser(db, 1))
+
+	// addAccount(db, "Bob", 50)
+
 }
 
 type Account struct {
@@ -72,13 +82,41 @@ type Account struct {
 	Balance int
 }
 
-func addAccount(db *sql.DB, name string, balance int) error {
+func getAccountsForUser(db *sql.DB, userID int) ([]Account, error) {
+	res := []Account{}
+	rows, err := db.Query(`
+	SELECT accounts.id, accounts.owner, accounts.balance
+	FROM accounts
+	JOIN users ON accounts.user_id = users.id
+	WHERE users.id = ?
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //
+	for rows.Next() {
+		var a Account
+		err = rows.Scan(&a.Id, &a.Owner, &a.Balance)
+		if err != nil {
+			return res, err
+		}
+		res = append(res, a)
+	}
+
+	if err = rows.Err(); err != nil {
+		return res, err
+	}
+	return res, nil
+
+}
+
+func addAccount(db *sql.DB, name string, balance, userID int) error {
 	if name == "" {
 		return fmt.Errorf("Name is empty")
 	}
 	_, err := db.Exec(
-		"INSERT INTO accounts(owner, balance) VALUES(?,?)",
-		name, balance,
+		"INSERT INTO accounts(owner, balance, user_id) VALUES(?,?,?)",
+		name, balance, userID,
 	)
 	if err != nil {
 		return err
@@ -116,13 +154,15 @@ func transfer(db *sql.DB, fromID, toID int, amount int) error {
 	var balanceFrom int
 	err = tx.QueryRow("SELECT balance FROM accounts WHERE id = ?", fromID).Scan(&balanceFrom)
 	if err != nil {
+		tx.Rollback()
 		return err
 	}
 	if balanceFrom < amount {
 		tx.Rollback()
 		return fmt.Errorf("insufficient funds: have %d, need %d", balanceFrom, amount)
 	}
-	_, err = tx.Exec(
+
+	res, err := tx.Exec(
 		"UPDATE accounts SET balance = balance - ? WHERE id = ?",
 		amount,
 		fromID,
@@ -131,8 +171,17 @@ func transfer(db *sql.DB, fromID, toID int, amount int) error {
 		tx.Rollback()
 		return err
 	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if rows == 0 {
+		tx.Rollback()
+		return fmt.Errorf("account %d does not exist", fromID)
+	}
 
-	_, err = tx.Exec(
+	res, err = tx.Exec(
 		"UPDATE accounts SET balance = balance + ? WHERE id = ?",
 		amount,
 		toID,
@@ -140,6 +189,15 @@ func transfer(db *sql.DB, fromID, toID int, amount int) error {
 	if err != nil {
 		tx.Rollback()
 		return err
+	}
+	rows, err = res.RowsAffected()
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if rows == 0 {
+		tx.Rollback()
+		return fmt.Errorf("account %d does not exist", toID)
 	}
 
 	err = tx.Commit()
